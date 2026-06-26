@@ -1,0 +1,470 @@
+<!DOCTYPE html>
+<html lang="zh">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>体素世界 | VoxelCraft</title>
+<link href="https://fonts.googleapis.com/css2?family=Press+Start+2P&display=swap" rel="stylesheet">
+<style>
+:root{--sky:#6eaad4;--sky2:#a8d4f0;--accent:#5b9f3e}
+*{margin:0;padding:0;box-sizing:border-box}
+body{overflow:hidden;background:#000;font-family:'Press Start 2P',monospace}
+canvas{display:block} /* [Fix #1] 移除 canvas 默认白边 */
+
+#blocker{position:fixed;inset:0;z-index:100;
+  display:flex;flex-direction:column;align-items:center;justify-content:center;cursor:pointer;
+  background:linear-gradient(180deg,rgba(8,8,20,.92) 0%,rgba(12,18,30,.92) 100%)}
+#blocker h1{font-size:clamp(18px,4vw,36px);color:var(--accent);
+  text-shadow:0 0 40px rgba(91,159,62,.35),0 4px 0 #2d5a1a;margin-bottom:50px;letter-spacing:4px}
+.keys{font-size:9px;color:#777;line-height:2.8;text-align:center}
+.keys span{color:#bbb}
+.start{margin-top:40px;font-size:10px;color:#aaa;animation:pls 2s ease infinite}
+@keyframes pls{0%,100%{opacity:.4}50%{opacity:1}}
+#err{position:fixed;inset:0;z-index:200;background:rgba(0,0,0,.95);
+  display:none;align-items:center;justify-content:center;flex-direction:column;
+  color:#e44;font-size:11px;text-align:center;padding:40px}
+#err button{margin-top:20px;padding:8px 20px;background:#333;color:#fff;border:1px solid #555;
+  font-family:inherit;font-size:10px;cursor:pointer}
+
+#crosshair{position:fixed;top:50%;left:50%;transform:translate(-50%,-50%);z-index:10;pointer-events:none}
+#hotbar{position:fixed;bottom:14px;left:50%;transform:translateX(-50%);display:flex;gap:3px;z-index:10;
+  padding:4px;background:rgba(0,0,0,.55);border:2px solid rgba(255,255,255,.12);border-radius:4px}
+.slot{width:40px;height:40px;border-radius:2px;border:2px solid rgba(255,255,255,.1);
+  position:relative;cursor:pointer;transition:transform .12s,border-color .12s}
+.slot.active{border-color:rgba(255,255,255,.9);transform:scale(1.12);box-shadow:0 0 12px rgba(255,255,255,.15)}
+.sn{position:absolute;bottom:1px;right:3px;font-size:7px;color:rgba(255,255,255,.55);text-shadow:1px 1px 0 #000}
+#hud{position:fixed;top:10px;left:10px;z-index:10;font-size:8px;
+  color:rgba(255,255,255,.55);line-height:2.2;text-shadow:1px 1px 0 rgba(0,0,0,.8)}
+#loading{position:fixed;inset:0;z-index:200;background:#080810;
+  display:flex;flex-direction:column;align-items:center;justify-content:center}
+#loading p{color:#555;font-size:11px;margin-top:16px}
+#loading .bar{width:200px;height:3px;background:#1a1a1a;border-radius:2px;overflow:hidden;margin-top:12px}
+#loading .fill{width:0%;height:100%;background:var(--accent);transition:width .3s}
+</style>
+</head>
+<body>
+
+<div id="loading">
+  <p>正在生成世界...</p>
+  <div class="bar"><div class="fill" id="loadbar"></div></div>
+</div>
+
+<div id="blocker" style="display:none">
+  <h1>VOXELCRAFT</h1>
+  <div class="keys">
+    <span>W A S D</span> 移动 &nbsp;<span>空格</span> 跳跃<br>
+    <span>鼠标移动</span> 视角<br>
+    <span>左键</span> 放置方块 &nbsp;<span>右键</span> 消除方块<br>
+    <span>1-7 / 滚轮</span> 选择方块
+  </div>
+  <div class="start">— 点击屏幕开始游戏 —</div>
+</div>
+
+<div id="err">
+  <p id="errmsg"></p>
+  <button onclick="location.reload()">重新加载</button>
+</div>
+
+<svg id="crosshair" width="20" height="20" viewBox="0 0 20 20">
+  <line x1="10" y1="3" x2="10" y2="8" stroke="#fff" stroke-width="1.5" opacity=".7"/>
+  <line x1="10" y1="12" x2="10" y2="17" stroke="#fff" stroke-width="1.5" opacity=".7"/>
+  <line x1="3" y1="10" x2="8" y2="10" stroke="#fff" stroke-width="1.5" opacity=".7"/>
+  <line x1="12" y1="10" x2="17" y2="10" stroke="#fff" stroke-width="1.5" opacity=".7"/>
+</svg>
+
+<div id="hotbar"></div>
+<div id="hud"></div>
+
+<script src="https://cdnjs.cloudflare.com/ajax/libs/three.js/r128/three.min.js"></script>
+<script>
+(function(){
+'use strict';
+
+/* ── Three.js 检查 ── */
+if(typeof THREE==='undefined'){
+  showError('Three.js 加载失败，请检查网络连接后刷新页面。');
+  return;
+}
+
+function showError(msg){
+  var el=document.getElementById('err');
+  document.getElementById('errmsg').textContent=msg;
+  el.style.display='flex';
+  document.getElementById('loading').style.display='none';
+}
+
+function setLoadProgress(pct){
+  document.getElementById('loadbar').style.width=pct+'%';
+}
+
+/* ═══ Perlin 噪声 ═══ */
+var Noise=(function(){
+  function N(s){
+    var p=new Uint8Array(256),i,v=s||42;
+    for(i=0;i<256;i++)p[i]=i;
+    for(i=255;i>0;i--){v=(v*16807)%2147483647;var j=v%(i+1),t=p[i];p[i]=p[j];p[j]=t}
+    this.p=new Uint8Array(512);
+    for(i=0;i<512;i++)this.p[i]=p[i&255];
+  }
+  N.prototype.fade=function(t){return t*t*t*(t*(t*6-15)+10)};
+  N.prototype.lerp=function(t,a,b){return a+t*(b-a)};
+  N.prototype.grad=function(h,x,y){h&=3;return((h&1)?-x:x)+((h&2)?-y:y)};
+  N.prototype.noise2D=function(x,y){
+    var X=Math.floor(x)&255,Y=Math.floor(y)&255,
+        xf=x-Math.floor(x),yf=y-Math.floor(y),
+        u=this.fade(xf),v=this.fade(yf),p=this.p,
+        A=p[X]+Y,B=p[X+1]+Y;
+    return this.lerp(v,
+      this.lerp(u,this.grad(p[A],xf,yf),this.grad(p[B],xf-1,yf)),
+      this.lerp(u,this.grad(p[A+1],xf,yf-1),this.grad(p[B+1],xf-1,yf-1)));
+  };
+  N.prototype.fbm=function(x,y,oct){
+    var v=0,a=1,f=1,m=0,i;
+    for(i=0;i<oct;i++){v+=this.noise2D(x*f,y*f)*a;m+=a;a*=.5;f*=2}
+    return v/m;
+  };
+  return N;
+})();
+
+/* ═══ 常量 ═══ */
+var WH=40, MAXH=50, PR=.29, PH=1.75, EYE=1.62,
+    MSENS=.002, MSPD=6, JMPV=9, GRAV=26, REACH=7;
+
+var BT={AIR:0,GRASS:1,DIRT:2,STONE:3,WOOD:4,LEAVES:5,SAND:6,SNOW:7,BED:8};
+var BC={1:0x5b8f30,2:0x8b6914,3:0x7f7f7f,4:0x6b4226,5:0x2d7a1e,6:0xd4c07a,7:0xeeeef8,8:0x333333};
+var BN={1:'草地',2:'泥土',3:'石头',4:'木头',5:'树叶',6:'沙子',7:'雪'};
+var HB=[1,2,3,4,5,6,7];
+
+/* ═══ 状态 ═══ */
+var world=new Map();
+var pl={x:0,y:30,z:0,vx:0,vy:0,vz:0,yaw:0,pitch:0,gnd:false};
+var locked=false,kd={},slot=0,wmeshes=[];
+var lastBuildTime=0,BUILD_COOLDOWN=100; // [Fix #3] 重建节流
+
+/* ═══ Three.js 场景 ═══ */
+var SKY_A=0x6eaad4, SKY_B=0x4888b4;
+var scene=new THREE.Scene();
+scene.background=new THREE.Color(SKY_A);
+// [Fix #4] 雾距匹配世界尺寸，边缘平滑
+scene.fog=new THREE.Fog(SKY_A,45,WH*Math.SQRT2+10);
+
+var camera=new THREE.PerspectiveCamera(72,innerWidth/innerHeight,.1,200);
+var renderer=new THREE.WebGLRenderer({antialias:true});
+renderer.setSize(innerWidth,innerHeight);
+renderer.setPixelRatio(Math.min(devicePixelRatio,2));
+document.body.appendChild(renderer.domElement);
+
+// [Fix #9] 增强光照，天空有深度感
+scene.add(new THREE.AmbientLight(0x94b0c8,.6));
+var sun=new THREE.DirectionalLight(0xfff4d6,.85);
+sun.position.set(40,80,25);scene.add(sun);
+scene.add(new THREE.HemisphereLight(SKY_A,0x5b8f30,.3));
+
+var bgeo=new THREE.BoxGeometry(1,1,1);
+var bmats={};
+Object.keys(BC).forEach(function(k){
+  // [Fix #8] 树叶使用双面材质
+  var doubleSide = (k === String(BT.LEAVES));
+  bmats[k]=new THREE.MeshLambertMaterial({color:BC[k],side:doubleSide?THREE.DoubleSide:THREE.FrontSide});
+});
+
+var hlMesh=new THREE.Mesh(
+  new THREE.BoxGeometry(1.008,1.008,1.008),
+  new THREE.MeshBasicMaterial({color:0x000000,wireframe:true,transparent:true,opacity:.3})
+);
+hlMesh.visible=false;scene.add(hlMesh);
+
+/* ═══ 地形生成 ═══ */
+var n1=new Noise(12345),n2=new Noise(67890);
+
+function hAt(x,z){
+  return Math.floor(n1.fbm(x*.008,z*.008,6)*25+12+n2.fbm(x*.004+50,z*.004+50,4)*12);
+}
+
+function genWorld(){
+  var x,z,h,y,t,key,totalCols=(WH*2)*(WH*2),done=0;
+  for(x=-WH;x<WH;x++){
+    for(z=-WH;z<WH;z++){
+      h=hAt(x,z);
+      for(y=0;y<=Math.min(h,MAXH);y++){
+        if(y===0) t=BT.BED;
+        else if(h<=8) t=BT.SAND;
+        else if(y===h) t=h>28?BT.SNOW:BT.GRASS;
+        else if(y>h-4) t=BT.DIRT;
+        else t=BT.STONE;
+        world.set(x+','+y+','+z,t);
+      }
+    }
+    done+=WH*2;
+    // 更新加载进度（仅在前半段）
+    if(x%8===0)setLoadProgress(Math.floor(done/totalCols*60));
+  }
+
+  // [Fix #5] 树木：降低阈值到 0.55，增加森林密度
+  var th,lx,ly,lz,r,k;
+  for(x=-WH+4;x<WH-4;x++)for(z=-WH+4;z<WH-4;z++){
+    if(n2.noise2D(x*.15,z*.15)<.55)continue;
+    h=hAt(x,z);if(h<=9||h>27)continue;
+    th=4+((n1.noise2D(x*.5,z*.5)+1)*1.5|0);
+    for(y=h+1;y<=h+th;y++)world.set(x+','+y+','+z,BT.WOOD);
+    for(ly=h+th-2;ly<=h+th+1;ly++){
+      r=ly>h+th-1?1:2;
+      for(lx=-r;lx<=r;lx++)for(lz=-r;lz<=r;lz++){
+        if(Math.abs(lx)===r&&Math.abs(lz)===r&&n1.noise2D((x+lx)*2,(z+lz)*2)>0)continue;
+        k=(x+lx)+','+ly+','+(z+lz);
+        if(!world.has(k))world.set(k,BT.LEAVES);
+      }
+    }
+  }
+  setLoadProgress(75);
+}
+
+/* ═══ 构建网格 ═══ */
+function isExp(x,y,z){
+  return !world.has((x+1)+','+y+','+z)||!world.has((x-1)+','+y+','+z)||
+         !world.has(x+','+(y+1)+','+z)||!world.has(x+','+(y-1)+','+z)||
+         !world.has(x+','+y+','+(z+1))||!world.has(x+','+y+','+(z-1));
+}
+
+function buildMeshes(){
+  var i;
+  // [Fix #7] 正确释放旧资源（geometry + material）
+  for(i=0;i<wmeshes.length;i++){
+    scene.remove(wmeshes[i]);
+    wmeshes[i].geometry.dispose();
+    wmeshes[i].material.dispose();
+    wmeshes[i].dispose();
+  }
+  wmeshes.length=0;
+
+  var grp={};
+  world.forEach(function(t,k){
+    var p=k.split(','),x=+p[0],y=+p[1],z=+p[2];
+    if(!isExp(x,y,z))return;
+    if(!grp[t])grp[t]=[];
+    grp[t].push(x,y,z);
+  });
+
+  var mat4=new THREE.Matrix4();
+  Object.keys(grp).forEach(function(ts){
+    var mat=bmats[ts];if(!mat)return;
+    var pos=grp[ts],cnt=pos.length/3;
+    var mesh=new THREE.InstancedMesh(bgeo,mat,cnt);
+    for(i=0;i<cnt;i++){
+      mat4.setPosition(pos[i*3]+.5,pos[i*3+1]+.5,pos[i*3+2]+.5);
+      mesh.setMatrixAt(i,mat4);
+    }
+    mesh.instanceMatrix.needsUpdate=true;
+    scene.add(mesh);wmeshes.push(mesh);
+  });
+  setLoadProgress(100);
+}
+
+/* ═══ 体素射线检测 ═══ */
+function vray(ox,oy,oz,dx,dy,dz,md){
+  var x=Math.floor(ox),y=Math.floor(oy),z=Math.floor(oz),
+      sx=dx>=0?1:-1,sy=dy>=0?1:-1,sz=dz>=0?1:-1,
+      tdx=dx?Math.abs(1/dx):1e30,
+      tdy=dy?Math.abs(1/dy):1e30,
+      tdz=dz?Math.abs(1/dz):1e30,
+      tmx=dx?(dx>0?x+1-ox:ox-x)*tdx:1e30,
+      tmy=dy?(dy>0?y+1-oy:oy-y)*tdy:1e30,
+      tmz=dz?(dz>0?z+1-oz:oz-z)*tdz:1e30,
+      nx=0,ny=0,nz=0,d=0;
+  while(d<md){
+    if(world.has(x+','+y+','+z))return{x:x,y:y,z:z,nx:nx,ny:ny,nz:nz};
+    if(tmx<tmy){if(tmx<tmz){d=tmx;x+=sx;tmx+=tdx;nx=-sx;ny=0;nz=0}
+      else{d=tmz;z+=sz;tmz+=tdz;nx=0;ny=0;nz=-sz}}
+    else{if(tmy<tmz){d=tmy;y+=sy;tmy+=tdy;nx=0;ny=-sy;nz=0}
+      else{d=tmz;z+=sz;tmz+=tdz;nx=0;ny=0;nz=-sz}}
+  }
+  return null;
+}
+
+function lookHit(){
+  var d=new THREE.Vector3(0,0,-1).applyQuaternion(camera.quaternion);
+  return vray(camera.position.x,camera.position.y,camera.position.z,d.x,d.y,d.z,REACH);
+}
+
+/* ═══ 玩家碰撞 ═══ */
+function col(px,py,pz){
+  var x0=Math.floor(px-PR),x1=Math.floor(px+PR),
+      y0=Math.floor(py),y1=Math.floor(py+PH),
+      z0=Math.floor(pz-PR),z1=Math.floor(pz+PR);
+  for(var bx=x0;bx<=x1;bx++)for(var by=y0;by<=y1;by++)for(var bz=z0;bz<=z1;bz++)
+    if(world.has(bx+','+by+','+bz))
+      if(px+PR>bx&&px-PR<bx+1&&py+PH>by&&py<by+1&&pz+PR>bz&&pz-PR<bz+1)return true;
+  return false;
+}
+
+/* ═══ 更新玩家 ═══ */
+function updPlayer(dt){
+  dt=Math.min(dt,.05);
+  var fw=new THREE.Vector3(-Math.sin(pl.yaw),0,-Math.cos(pl.yaw));
+  var rt=new THREE.Vector3(Math.cos(pl.yaw),0,-Math.sin(pl.yaw));
+  var dir=new THREE.Vector3();
+  if(kd.KeyW||kd.ArrowUp)dir.add(fw);
+  if(kd.KeyS||kd.ArrowDown)dir.sub(fw);
+  if(kd.KeyA||kd.ArrowLeft)dir.sub(rt);
+  if(kd.KeyD||kd.ArrowRight)dir.add(rt);
+  if(dir.lengthSq()>0)dir.normalize().multiplyScalar(MSPD);
+  pl.vx=dir.x;pl.vz=dir.z;
+  pl.vy-=GRAV*dt;if(pl.vy<-40)pl.vy=-40;
+  if(kd.Space&&pl.gnd){pl.vy=JMPV;pl.gnd=false}
+
+  var sx=pl.x;pl.x+=pl.vx*dt;if(col(pl.x,pl.y,pl.z))pl.x=sx;
+  var sz=pl.z;pl.z+=pl.vz*dt;if(col(pl.x,pl.y,pl.z))pl.z=sz;
+  var sy=pl.y;pl.y+=pl.vy*dt;
+  if(col(pl.x,pl.y,pl.z)){if(pl.vy<0)pl.gnd=true;pl.y=sy;pl.vy=0}else pl.gnd=false;
+
+  // [Fix #6] 虚空重置：clamp 到有效世界范围内
+  if(pl.y<-20){
+    var rx=Math.max(-WH+2,Math.min(WH-3,Math.round(pl.x)));
+    var rz=Math.max(-WH+2,Math.min(WH-3,Math.round(pl.z)));
+    pl.y=hAt(rx,rz)+5;
+    if(pl.y<5)pl.y=15; // 如果 hAt 返回异常低值，用安全高度
+    pl.x=rx;pl.z=rz;pl.vy=0;
+  }
+}
+
+/* ═══ 方块交互（带节流） ═══ */
+function rebuild(){
+  var now=performance.now();
+  if(now-lastBuildTime<BUILD_COOLDOWN)return false;
+  lastBuildTime=now;
+  buildMeshes();
+  return true;
+}
+
+function placeBlock(x,y,z){
+  var k=x+','+y+','+z;if(world.has(k))return;
+  world.set(k,HB[slot]);
+  if(col(pl.x,pl.y,pl.z)){world.delete(k);return}
+  rebuild();
+}
+function removeBlock(x,y,z){
+  var k=x+','+y+','+z;
+  if(!world.has(k)||world.get(k)===BT.BED)return;
+  world.delete(k);rebuild();
+}
+
+/* ═══ 输入 ═══ */
+// [Fix #2] Pointer Lock 带错误处理
+document.getElementById('blocker').addEventListener('click',function(){
+  try{
+    var p=renderer.domElement.requestPointerLock();
+    if(p&&p.catch){ // 现代浏览器返回 Promise
+      p.catch(function(err){
+        console.warn('Pointer Lock 失败:',err);
+      });
+    }
+  }catch(e){
+    console.warn('Pointer Lock 请求异常:',e);
+  }
+});
+
+document.addEventListener('pointerlockchange',function(){
+  locked=document.pointerLockElement===renderer.domElement;
+  document.getElementById('blocker').style.display=locked?'none':'flex';
+});
+
+document.addEventListener('mousemove',function(e){
+  if(!locked)return;
+  pl.yaw-=e.movementX*MSENS;
+  pl.pitch=Math.max(-1.55,Math.min(1.55,pl.pitch-e.movementY*MSENS));
+});
+document.addEventListener('mousedown',function(e){
+  if(!locked)return;var h=lookHit();if(!h)return;
+  if(e.button===0)placeBlock(h.x+h.nx,h.y+h.ny,h.z+h.nz);
+  else if(e.button===2)removeBlock(h.x,h.y,h.z);
+});
+document.addEventListener('contextmenu',function(e){e.preventDefault()});
+document.addEventListener('keydown',function(e){
+  kd[e.code]=true;
+  var n=parseInt(e.key);if(n>=1&&n<=HB.length){slot=n-1;updHB()}
+  // [Fix #3] 阻止空格键滚动页面
+  if(e.code==='Space'&&locked)e.preventDefault();
+});
+document.addEventListener('keyup',function(e){kd[e.code]=false});
+document.addEventListener('wheel',function(e){
+  if(!locked)return;
+  slot=(slot+Math.sign(e.deltaY)+HB.length)%HB.length;updHB()});
+
+/* ═══ UI ═══ */
+function initHB(){
+  var el=document.getElementById('hotbar');el.innerHTML='';
+  HB.forEach(function(t,i){
+    var d=document.createElement('div');
+    d.className='slot'+(i===slot?' active':'');
+    d.style.backgroundColor='#'+BC[t].toString(16).padStart(6,'0');
+    var n=document.createElement('span');n.className='sn';n.textContent=i+1;
+    d.appendChild(n);
+    d.addEventListener('click',function(){slot=i;updHB()});
+    el.appendChild(d);
+  });
+}
+function updHB(){
+  var ss=document.querySelectorAll('.slot');
+  ss.forEach(function(s,i){s.className='slot'+(i===slot?' active':'')});
+}
+
+/* ═══ 主循环 ═══ */
+var lastT=performance.now(),fc=0,fa=0,fps=0;
+
+function loop(){
+  requestAnimationFrame(loop);
+  var now=performance.now(),dt=(now-lastT)/1000;lastT=now;
+  fc++;fa+=dt;if(fa>=1){fps=fc;fc=0;fa-=1}
+
+  if(locked)updPlayer(dt);
+
+  camera.position.set(pl.x,pl.y+EYE,pl.z);
+  camera.quaternion.setFromEuler(new THREE.Euler(pl.pitch,pl.yaw,0,'YXZ'));
+
+  if(locked){
+    var h=lookHit();
+    if(h){hlMesh.visible=true;hlMesh.position.set(h.x+.5,h.y+.5,h.z+.5)}
+    else hlMesh.visible=false;
+  }else hlMesh.visible=false;
+
+  // [Fix #11] HUD 显示方块名称
+  var blockName=BN[HB[slot]]||'???';
+  document.getElementById('hud').innerHTML=
+    'FPS '+fps+'<br>'+
+    pl.x.toFixed(1)+' / '+pl.y.toFixed(1)+' / '+pl.z.toFixed(1)+'<br>'+
+    '[当前] '+blockName;
+  renderer.render(scene,camera);
+}
+
+window.addEventListener('resize',function(){
+  camera.aspect=innerWidth/innerHeight;
+  camera.updateProjectionMatrix();
+  renderer.setSize(innerWidth,innerHeight);
+});
+
+/* ═══ 初始化 ═══ */
+try{
+  genWorld();
+  pl.y=hAt(0,0)+3;
+  // 安全出生点搜索
+  while(col(pl.x,pl.y,pl.z)&&pl.y<100)pl.y+=1;
+  // 如果搜到上限仍碰撞，强制传送到安全高度
+  if(col(pl.x,pl.y,pl.z)){pl.y=30;pl.x=0;pl.z=0}
+
+  camera.position.set(pl.x,pl.y+EYE,pl.z);
+  camera.quaternion.setFromEuler(new THREE.Euler(0,0,0,'YXZ'));
+  buildMeshes();
+  initHB();
+
+  document.getElementById('loading').style.display='none';
+  document.getElementById('blocker').style.display='flex';
+  loop();
+}catch(err){
+  console.error('Game init error:',err);
+  showError('游戏初始化失败：'+err.message);
+}
+
+})();
+</script>
+</body>
+</html>
